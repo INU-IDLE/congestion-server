@@ -1,64 +1,57 @@
-from fastapi import FastAPI
-from pydantic import BaseModel
-import joblib
+from fastapi import FastAPI, Query, Path
+from fastapi.middleware.cors import CORSMiddleware
 import pandas as pd
 import numpy as np
+import joblib
 import os
 from catboost import Pool
 
 app = FastAPI()
 model_cache = {}
+fft_data_by_line = {}
 
-class Query(BaseModel):
-    station_id: int
-    time_slot: int
-    updnLine: str
-    weekday_type: str
-    line: int
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 line_car_count = {
-    2: 10,
-    3: 10,
-    4: 10,
-    5: 8,
-    6: 8,
-    7: 8,
+    2: 10, 3: 10, 4: 10,
+    5: 8, 6: 8, 7: 8,
     8: 6
 }
 
 feature_order_map = {
-    2: [f'congestionCar_{i}_fft' for i in range(1, 11)] + [
-        '역번호', '시간대', 'updnLine', '요일_카테고리', 'is_weekend', 'time_segment', 'hour'
-    ],
-    3: [f'congestionCar_{i}_fft' for i in range(1, 11)] + [
-        '역번호', '시간대', 'updnLine', '요일', 'is_weekend', 'time_segment', 'hour'
-    ],
-    4: [f'congestionCar_{i}_fft' for i in range(1, 11)] + [
-        '역번호', '시간대', 'updnLine', '요일', 'is_weekend', 'time_segment', 'hour'
-    ],
-    5: [f'congestionCar_{i}_fft' for i in range(1, 9)] + [
-        '역번호', '시간대', 'updnLine', '요일', 'is_weekend', 'time_segment', 'hour'
-    ],
-    6: [f'congestionCar_{i}_fft' for i in range(1, 9)] + [
-        '역번호', '시간대', 'updnLine', '요일', 'is_weekend', 'time_segment', 'hour'
-    ],
-    7: [f'congestionCar_{i}_fft' for i in range(1, 9)] + [
-        '역번호', '시간대', 'updnLine', '요일', 'is_weekend', 'time_segment', 'hour'
-    ],
-    8: [f'congestionCar_{i}_fft' for i in range(1, 7)] + [
-        '역번호', '시간대', 'updnLine', '요일', 'is_weekend', 'time_segment', 'hour'
-    ]
+    line: [f'congestionCar_{i}_fft' for i in range(1, count + 1)] +
+          ['역번호', '시간대', 'updnLine', '요일_카테고리', 'is_weekend', 'time_segment', 'hour']
+    for line, count in line_car_count.items()
 }
 
 cat_features_map = {
-    2: ['updnLine', '요일_카테고리', 'time_segment'],
-    3: ['updnLine', '요일', 'time_segment'],
-    4: ['updnLine', '요일', 'time_segment'],
-    5: ['updnLine', '요일', 'time_segment'],
-    6: ['updnLine', '요일', 'time_segment'],
-    7: ['updnLine', '요일', 'time_segment'],
-    8: ['updnLine', '요일', 'time_segment']
+    line: ['updnLine', '요일_카테고리', 'time_segment']
+    for line in line_car_count
 }
+
+month_weight_map = {
+    1: 0.85, 2: 0.82, 3: 0.88,
+    4: 0.97, 5: 1.00, 6: 0.94,
+    7: 0.90, 8: 0.86, 9: 0.99,
+    10: 1.01, 11: 1.05, 12: 1.01
+}
+
+# Load models & FFT CSV
+for line in line_car_count:
+    model_path = f"catboost_models_{line}.pkl"
+    fft_path = f"fourier_transformed_data/fourier_transformed_data_{line}.csv"
+    if os.path.exists(model_path):
+        model_cache[line] = joblib.load(model_path)
+        print(f"[✅ 모델 로딩 완료] line {line}")
+    if os.path.exists(fft_path):
+        fft_data_by_line[line] = pd.read_csv(fft_path)
+        print(f"[✅ FFT 데이터 로딩 완료] line {line}")
 
 def get_time_segment_and_flags(time_slot: int, weekday_type: str):
     hour = time_slot // 100
@@ -74,92 +67,110 @@ def get_time_segment_and_flags(time_slot: int, weekday_type: str):
         segment = '저녁'
     else:
         segment = '심야'
-    is_weekend = 1 if weekday_type in ['토요일', '일요일'] else 0
+    is_weekend = int(weekday_type in ['토요일', '일요일'])
     return segment, is_weekend, hour
 
-def generate_features_dict(station_id, time_slot, updnLine, weekday_type, line, car_no):
+def generate_features_dict(station_id, time_slot, updnLine, weekday_type, line):
     segment, is_weekend, hour = get_time_segment_and_flags(time_slot, weekday_type)
+    updn_str = str(updnLine)
+
     base = {
         '역번호': station_id,
         '시간대': time_slot,
-        'updnLine': str(updnLine),
+        'updnLine': updn_str,
         'is_weekend': is_weekend,
-        'hour': hour
+        'hour': hour,
+        'time_segment': segment,
+        '요일_카테고리': weekday_type
     }
-    if line == 2:
-        base['요일_카테고리'] = str(weekday_type)
+
+    fft_df = fft_data_by_line.get(line)
+    if fft_df is not None:
+        try:
+            updn_numeric = int(updnLine)
+        except ValueError:
+            updn_numeric = 1 if updnLine == '상행' else 0
+
+        group = fft_df[
+            (fft_df['역번호'] == station_id) &
+            (fft_df['updnLine'] == updn_numeric) &
+            (fft_df['요일_카테고리'] == weekday_type)
+        ].copy()
+        group['시간대'] = group['시간대'].astype(int)
+
+        if time_slot in group['시간대'].values:
+            row = group[group['시간대'] == time_slot].iloc[0]
+            for i in range(1, line_car_count[line] + 1):
+                base[f'congestionCar_{i}_fft'] = row[f'congestionCar_{i}_fft']
+        else:
+            before = group[group['시간대'] < time_slot].tail(1)
+            after = group[group['시간대'] > time_slot].head(1)
+            if not before.empty and not after.empty:
+                t1 = before['시간대'].values[0]
+                t2 = after['시간대'].values[0]
+                r = (time_slot - t1) / (t2 - t1)
+                print(f"[🔄 보간 적용] {t1}~{t2} → {time_slot} (비율: {r:.2f})")
+                for i in range(1, line_car_count[line] + 1):
+                    col = f'congestionCar_{i}_fft'
+                    v1 = before[col].values[0]
+                    v2 = after[col].values[0]
+                    base[col] = v1 * (1 - r) + v2 * r
+            else:
+                print(f"[⚠️ 보간 불가] station={station_id}, time={time_slot}")
+                for i in range(1, line_car_count[line] + 1):
+                    base[f'congestionCar_{i}_fft'] = 0.0
     else:
-        base['요일'] = str(weekday_type)
-    base['time_segment'] = str(segment)
-
-    for i in range(1, line_car_count[line] + 1):
-        base[f'congestionCar_{i}_fft'] = 0.0
-
-    if line == 2 and car_no == 10:
-        base['congestionCar_10_special'] = hour * int(updnLine == '하행')
+        for i in range(1, line_car_count[line] + 1):
+            base[f'congestionCar_{i}_fft'] = 0.0
 
     return base
 
-@app.post("/predict_all_cars")
-def predict_all_cars(query: Query):
-    line = query.line
-    model_path = f"catboost_models_{line}.pkl"
-
+@app.get("/api/v1/congestion/real-time/car/{station_code}")
+def predict_all_cars(
+    station_code: int = Path(...),
+    time_slot: int = Query(...),
+    updnLine: str = Query(...),
+    weekday_type: str = Query(...),
+    line: int = Query(...),
+    month: int = Query(...)
+):
     if line not in model_cache:
-        if not os.path.exists(model_path):
-            return {"error": f"모델 파일 {model_path} 이 존재하지 않아요."}
-        model_cache[line] = joblib.load(model_path)
+        return {"error": f"모델이 없습니다: line {line}"}
 
     models = model_cache[line]
-    car_count = line_car_count.get(line, 6)
+    car_count = line_car_count[line]
     features = feature_order_map[line]
     cat_features = cat_features_map[line]
+    weight = month_weight_map.get(month, 1.0)
 
     predictions = {}
-    minute = query.time_slot % 100
-    lower_min = 0 if minute < 30 else 30
-    upper_min = 30 if lower_min == 0 else 60
-    lower_time = (query.time_slot // 100) * 100 + lower_min
-    upper_time = lower_time + 30 if upper_min == 30 else (query.time_slot // 100 + 1) * 100
-    ratio = (query.time_slot - lower_time) / 30
+
+    f_dict = generate_features_dict(station_code, time_slot, updnLine, weekday_type, line)
+    f = pd.DataFrame([f_dict])[features]
+
+    for col in cat_features:
+        if col in f.columns:
+            f[col] = f[col].astype('category')
+
+    
 
     for car_no in range(1, car_count + 1):
         model_key = f"congestionCar_{car_no}"
         if model_key not in models:
-            predictions[f"car_{car_no}"] = "모델 없음"
+            predictions[f"car_{car_no}"] = None
             continue
 
-        f1_dict = generate_features_dict(query.station_id, lower_time, query.updnLine, query.weekday_type, line, car_no)
-        f2_dict = generate_features_dict(query.station_id, upper_time, query.updnLine, query.weekday_type, line, car_no)
+        print(f"✅ 모델 학습된 features: {models[model_key].feature_names_}")
 
-        f1 = pd.DataFrame([f1_dict])
-        f2 = pd.DataFrame([f2_dict])
-
-        if line == 2 and car_no == 10:
-            f1 = f1[features + ['congestionCar_10_special']]
-            f2 = f2[features + ['congestionCar_10_special']]
-        else:
-            f1 = f1[features]
-            f2 = f2[features]
-
-        for col in cat_features:
-            if col in f1.columns:
-                f1[col] = f1[col].astype('category')
-                f2[col] = f2[col].astype('category')
-
-        f1_pool = Pool(f1, cat_features=cat_features)
-        f2_pool = Pool(f2, cat_features=cat_features)
-
-        pred1 = models[model_key].predict(f1_pool)[0]
-        pred2 = models[model_key].predict(f2_pool)[0]
-        interpolated = pred1 * (1 - ratio) + pred2 * ratio
-        predictions[f"car_{car_no}"] = np.expm1(interpolated)
+        pred_log = models[model_key].predict(Pool(f, cat_features=cat_features))[0]
+        predictions[f"car_{car_no}"] = round(np.expm1(pred_log) * weight, 2)
 
     return {
-        "station": query.station_id,
-        "time_slot": query.time_slot,
-        "updnLine": query.updnLine,
-        "weekday_type": query.weekday_type,
-        "line": query.line,
+        "station": station_code,
+        "time_slot": time_slot,
+        "updnLine": updnLine,
+        "weekday_type": weekday_type,
+        "line": line,
+        "month": month,
         "predictions": predictions
     }
