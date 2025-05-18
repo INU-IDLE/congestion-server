@@ -133,9 +133,9 @@ def generate_features_dict(station_id, time_slot, updnLine, weekday_type, line):
 # API 엔드포인트
 @app.get("/api/v1/congestion/real-time/car/{station_code}")
 def predict_all_cars(
-    station_code: int = Path(...),
+    station_code: str = Path(...),
     time_slot: int = Query(...),
-    updnLine: str = Query(...),
+    updnLine: int = Query(...),
     weekday_type: str = Query(...),
     line: int = Query(...),
     month: int = Query(...)
@@ -150,20 +150,17 @@ def predict_all_cars(
     cat_features = cat_features_map[line]
     weight = month_weight_map.get(month, 1.0)
 
-    predictions = {}
     f_dict = generate_features_dict(station_code, time_slot, updnLine, weekday_type, line)
     f = pd.DataFrame([f_dict])[features]
 
     for col in cat_features:
         f[col] = f[col].astype('category')
 
-    # ✅ 평일 + 출퇴근 시간 조건일 때만 고혼잡 모델 사용
-    is_peak = (
-        weekday_type == "평일" and
-        ((700 <= time_slot <= 900) or (1730 <= time_slot <= 1930))
-    )
+    # ✅ 평일 + 출퇴근 시간일 때 고혼잡 모델 사용
+    is_peak = weekday_type in ['평일'] and ((700 <= time_slot <= 900) or (1730 <= time_slot <= 1930))
     model_group = con_models if is_peak else gen_models
 
+    predictions = {}
     for car_no in range(1, car_count + 1):
         model_key = f"congestionCar_{car_no}"
         if model_key not in model_group:
