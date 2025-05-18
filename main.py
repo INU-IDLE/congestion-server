@@ -37,11 +37,21 @@ cat_features_map = {
 
 # 월별 가중치
 month_weight_map = {
-    1: 1.00, 2: 0.965, 3: 1.035, 4: 1.141, 5: 1.176, 6: 1.106,
-    7: 1.059, 8: 1.012, 9: 1.165, 10: 1.188, 11: 1.235, 12: 1.188
+    1: 1.00,
+    2: 0.965,
+    3: 1.035,
+    4: 1.141,
+    5: 1.176,
+    6: 1.106,
+    7: 1.059,
+    8: 1.012,
+    9: 1.165,
+    10: 1.188,
+    11: 1.235,
+    12: 1.188
 }
 
-# 모델 및 데이터 로딩
+# 모델 & 데이터 로딩
 general_models = {}
 congested_models = {}
 fft_data_by_line = {}
@@ -64,29 +74,24 @@ for line in line_car_count:
 # 시간대 파생 특성
 def get_time_segment_and_flags(time_slot: int, weekday_type: str):
     hour = time_slot // 100
-    if time_slot < 500:
-        segment = '새벽'
-    elif time_slot < 800:
-        segment = '아침'
-    elif time_slot < 1200:
-        segment = '점심'
-    elif time_slot < 1600:
-        segment = '오후'
-    elif time_slot < 2000:
-        segment = '저녁'
-    else:
-        segment = '심야'
+    if time_slot < 500: segment = '새벽'
+    elif time_slot < 800: segment = '아침'
+    elif time_slot < 1200: segment = '점심'
+    elif time_slot < 1600: segment = '오후'
+    elif time_slot < 2000: segment = '저녁'
+    else: segment = '심야'
     is_weekend = int(weekday_type in ['토요일', '일요일'])
     return segment, is_weekend, hour
 
 # 입력 feature 생성
-def generate_features_dict(station_id: str, time_slot: int, updnLine: int, weekday_type: str, line: int):
+def generate_features_dict(station_id, time_slot, updnLine, weekday_type, line):
     segment, is_weekend, hour = get_time_segment_and_flags(time_slot, weekday_type)
+    updn_int = int(updnLine)
 
     base = {
-        '역번호': station_id,
+        '역번호': str(station_id),
         '시간대': time_slot,
-        'updnLine': updnLine,
+        'updnLine': updn_int,
         'is_weekend': is_weekend,
         'hour': hour,
         'time_segment': segment,
@@ -96,8 +101,8 @@ def generate_features_dict(station_id: str, time_slot: int, updnLine: int, weekd
     fft_df = fft_data_by_line.get(line)
     if fft_df is not None:
         group = fft_df[
-            (fft_df['역번호'].astype(str) == station_id) &
-            (fft_df['updnLine'] == updnLine) &
+            (fft_df['역번호'].astype(str) == str(station_id)) &
+            (fft_df['updnLine'] == updn_int) &
             (fft_df['요일_카테고리'] == weekday_type)
         ].copy()
         group['시간대'] = group['시간대'].astype(int)
@@ -128,9 +133,9 @@ def generate_features_dict(station_id: str, time_slot: int, updnLine: int, weekd
 # API 엔드포인트
 @app.get("/api/v1/congestion/real-time/car/{station_code}")
 def predict_all_cars(
-    station_code: str = Path(...),
+    station_code: int = Path(...),
     time_slot: int = Query(...),
-    updnLine: int = Query(...),
+    updnLine: str = Query(...),
     weekday_type: str = Query(...),
     line: int = Query(...),
     month: int = Query(...)
@@ -145,14 +150,18 @@ def predict_all_cars(
     cat_features = cat_features_map[line]
     weight = month_weight_map.get(month, 1.0)
 
+    predictions = {}
     f_dict = generate_features_dict(station_code, time_slot, updnLine, weekday_type, line)
     f = pd.DataFrame([f_dict])[features]
 
     for col in cat_features:
         f[col] = f[col].astype('category')
 
-    predictions = {}
-    is_peak = (700 <= time_slot <= 900) or (1730 <= time_slot <= 1930)
+    # ✅ 평일 + 출퇴근 시간 조건일 때만 고혼잡 모델 사용
+    is_peak = (
+        weekday_type == "평일" and
+        ((700 <= time_slot <= 900) or (1730 <= time_slot <= 1930))
+    )
     model_group = con_models if is_peak else gen_models
 
     for car_no in range(1, car_count + 1):
