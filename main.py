@@ -170,6 +170,7 @@ def predict_all_cars(
             continue
 
         pred = model_group[model_key].predict(Pool(f, cat_features=cat_features))[0]
+        pred = max(pred, 0)
         predictions[f"car_{car_no}"] = round(pred * weight, 2)
 
     return {
