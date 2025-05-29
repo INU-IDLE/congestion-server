@@ -144,20 +144,34 @@ def predict_all_cars(
     for col in cat_features:
         f[col] = f[col].astype('category')
 
-    # ✅ 평균 혼잡도를 기준으로 고혼잡 모델 사용 여부 결정
+    # ✅ 평균 혼잡도를 기준으로 고혼잡 모델 사용 여부 결정 (선형보간 포함)
     ref_df = fft_data_by_line[line]
-    ref_row = ref_df[
+    group = ref_df[
         (ref_df['역번호'].astype(str) == str(station_code)) &
-        (ref_df['시간대'].astype(int) == time_slot) &
-        (ref_df['updnLine'].astype(int) == updnLine) &
+        (ref_df['updnLine'] == updnLine) &
         (ref_df['요일_카테고리'] == weekday_type)
-    ]
+    ].copy()
+    group['시간대'] = group['시간대'].astype(int)
 
-    if not ref_row.empty:
+    if time_slot in group['시간대'].values:
+        ref_row = group[group['시간대'] == time_slot]
         car_cols = [f'congestionCar_{i}' for i in range(1, car_count + 1)]
         mean_congestion = ref_row[car_cols].mean(axis=1).values[0]
     else:
-        mean_congestion = 0
+        before = group[group['시간대'] < time_slot].tail(1)
+        after = group[group['시간대'] > time_slot].head(1)
+        if not before.empty and not after.empty:
+            t1, t2 = before['시간대'].values[0], after['시간대'].values[0]
+            r = (time_slot - t1) / (t2 - t1)
+            mean_congestion = 0
+            for i in range(1, car_count + 1):
+                col = f'congestionCar_{i}'
+                v1 = before[col].values[0]
+                v2 = after[col].values[0]
+                mean_congestion += v1 * (1 - r) + v2 * r
+            mean_congestion /= car_count
+        else:
+            mean_congestion = 0
 
     threshold = 32.0
     model_group = con_models if mean_congestion >= threshold else gen_models
