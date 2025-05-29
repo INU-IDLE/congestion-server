@@ -37,18 +37,9 @@ cat_features_map = {
 
 # 월별 가중치
 month_weight_map = {
-    1: 1.00,
-    2: 0.965,
-    3: 1.035,
-    4: 1.141,
-    5: 1.176,
-    6: 1.106,
-    7: 1.059,
-    8: 1.012,
-    9: 1.165,
-    10: 1.188,
-    11: 1.235,
-    12: 1.188
+    1: 1.00, 2: 0.965, 3: 1.035, 4: 1.141,
+    5: 1.176, 6: 1.106, 7: 1.059, 8: 1.012,
+    9: 1.165, 10: 1.188, 11: 1.235, 12: 1.188
 }
 
 # 모델 & 데이터 로딩
@@ -63,13 +54,10 @@ for line in line_car_count:
 
     if os.path.exists(gen_path):
         general_models[line] = joblib.load(gen_path)
-        print(f"[✅ 일반 모델 로딩 완료] line {line}")
     if os.path.exists(con_path):
         congested_models[line] = joblib.load(con_path)
-        print(f"[✅ 고혼잡 모델 로딩 완료] line {line}")
     if os.path.exists(fft_path):
         fft_data_by_line[line] = pd.read_csv(fft_path)
-        print(f"[✅ FFT 데이터 로딩 완료] line {line}")
 
 # 시간대 파생 특성
 def get_time_segment_and_flags(time_slot: int, weekday_type: str):
@@ -156,9 +144,23 @@ def predict_all_cars(
     for col in cat_features:
         f[col] = f[col].astype('category')
 
-    # ✅ 평일 + 출퇴근 시간일 때 고혼잡 모델 사용
-    is_peak = weekday_type in ['평일'] and ((700 <= time_slot <= 900) or (1730 <= time_slot <= 1930))
-    model_group = con_models if is_peak else gen_models
+    # ✅ 평균 혼잡도를 기준으로 고혼잡 모델 사용 여부 결정
+    ref_df = fft_data_by_line[line]
+    ref_row = ref_df[
+        (ref_df['역번호'].astype(str) == str(station_code)) &
+        (ref_df['시간대'].astype(int) == time_slot) &
+        (ref_df['updnLine'].astype(int) == updnLine) &
+        (ref_df['요일_카테고리'] == weekday_type)
+    ]
+
+    if not ref_row.empty:
+        car_cols = [f'congestionCar_{i}' for i in range(1, car_count + 1)]
+        mean_congestion = ref_row[car_cols].mean(axis=1).values[0]
+    else:
+        mean_congestion = 0
+
+    threshold = 32.0
+    model_group = con_models if mean_congestion >= threshold else gen_models
 
     predictions = {}
     for car_no in range(1, car_count + 1):
